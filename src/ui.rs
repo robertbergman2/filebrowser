@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -97,6 +97,11 @@ fn render_file_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    // Clear the area first: ratatui's Block only patches cell style, not the
+    // symbol, so a shorter preview (e.g. "<directory>" after a long file)
+    // would leave the previous frame's characters in the rows below.
+    frame.render_widget(Clear, area);
+
     let (title, content) = preview_content(app);
     let preview = Paragraph::new(content)
         .wrap(Wrap { trim: false })
