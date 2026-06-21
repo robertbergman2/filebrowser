@@ -12,6 +12,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::filesystem;
@@ -32,8 +34,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(rows[1]);
 
-    let title = Paragraph::new(app.current_dir().display().to_string())
-        .block(Block::default().borders(Borders::ALL).title("Path"));
+    let title = Paragraph::new(sanitize_for_terminal(
+        &app.current_dir().display().to_string(),
+        false,
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Path"));
     frame.render_widget(title, rows[0]);
 
     render_file_list(frame, app, body[0]);
@@ -86,7 +91,7 @@ fn render_file_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ListItem::new(Line::from(vec![
                 Span::raw(prefix),
                 Span::raw(" "),
-                Span::raw(entry.name.as_str()),
+                Span::raw(sanitize_for_terminal(&entry.name, false)),
             ]))
             .style(style)
         })
@@ -126,110 +131,91 @@ fn preview_lines(app: &App, width: usize) -> (String, Vec<Line<'static>>) {
     };
 
     if entry.is_dir {
-        return (entry.name.clone(), vec![Line::from("<directory>")]);
+        return (
+            sanitize_for_terminal(&entry.name, false),
+            vec![Line::from("<directory>")],
+        );
     }
 
     let path = app.current_dir().join(&entry.name);
     let content =
         filesystem::read_preview(&path).unwrap_or_else(|| "<binary or unreadable>".to_string());
-    let lines = wrap_text(&content, width)
+    let lines = wrap_text(&sanitize_for_terminal(&content, true), width)
         .into_iter()
         .map(Line::from)
         .collect();
-    (entry.name.clone(), lines)
+    (sanitize_for_terminal(&entry.name, false), lines)
 }
 
-/// Greedy word-wrap `content` to `width` columns, returning one string per
-/// visual row. Leading whitespace on each input line is preserved so source
-/// indentation survives; words longer than `width` are hard-broken. Width is
-/// measured in `char` count (a close-enough proxy for display columns for the
-/// ASCII-dominated content the preview is built for).
+/// Render `content` safely by replacing terminal control characters with their
+/// visible hexadecimal escapes. Newlines are optionally retained as preview
+/// line delimiters; every other control character is escaped.
+fn sanitize_for_terminal(content: &str, allow_newlines: bool) -> String {
+    let mut sanitized = String::with_capacity(content.len());
+    for character in content.chars() {
+        if character == '\n' && allow_newlines {
+            sanitized.push(character);
+        } else if character.is_control() {
+            use std::fmt::Write;
+
+            let _ = write!(sanitized, "\\x{:02X}", character as u32);
+        } else {
+            sanitized.push(character);
+        }
+    }
+    sanitized
+}
+
+/// Greedy word-wrap `content` to `width` terminal columns, returning one
+/// string per visual row. It preserves all whitespace and keeps Unicode
+/// grapheme clusters intact, while splitting oversized words at grapheme
+/// boundaries when necessary.
 fn wrap_text(content: &str, width: usize) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut output = Vec::new();
     for logical_line in content.split('\n') {
         let line = logical_line.strip_suffix('\r').unwrap_or(logical_line);
-        if width == 0 || line.chars().count() <= width {
-            out.push(line.to_string());
+        if width == 0 || UnicodeWidthStr::width(line) <= width {
+            output.push(line.to_string());
             continue;
         }
 
-        let mut cur = String::new();
-        let mut cur_len = 0usize;
-        let chars: Vec<char> = line.chars().collect();
-        let mut i = 0;
+        let mut current = Vec::new();
+        let mut current_width = 0;
+        for grapheme in UnicodeSegmentation::graphemes(line, true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
 
-        while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
-            if cur_len == width {
-                out.push(cur.clone());
-                cur.clear();
-                cur_len = 0;
+            while current_width > 0 && current_width + grapheme_width > width {
+                let break_at = current
+                    .iter()
+                    .rposition(|segment: &&str| segment.chars().all(char::is_whitespace));
+
+                if let Some(break_at) = break_at {
+                    let next = current.split_off(break_at + 1);
+                    output.push(current.concat());
+                    current = next;
+                    current_width = current
+                        .iter()
+                        .map(|segment| UnicodeWidthStr::width(*segment))
+                        .sum();
+                } else {
+                    output.push(current.concat());
+                    current.clear();
+                    current_width = 0;
+                }
             }
-            cur.push(chars[i]);
-            cur_len += 1;
-            i += 1;
+
+            current.push(grapheme);
+            current_width += grapheme_width;
         }
 
-        while i < chars.len() {
-            let word_start = i;
-            while i < chars.len() && chars[i] != ' ' && chars[i] != '\t' {
-                i += 1;
-            }
-            let word: String = chars[word_start..i].iter().collect();
-            let word_len = word.chars().count();
-
-            let ws_start = i;
-            while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
-                i += 1;
-            }
-            let ws: String = chars[ws_start..i].iter().collect();
-            let ws_len = ws.chars().count();
-
-            if word_len > width {
-                if cur_len > 0 {
-                    out.push(cur.clone());
-                    cur.clear();
-                    cur_len = 0;
-                }
-                for c in word.chars() {
-                    if cur_len == width {
-                        out.push(cur.clone());
-                        cur.clear();
-                        cur_len = 0;
-                    }
-                    cur.push(c);
-                    cur_len += 1;
-                }
-                if cur_len + ws_len <= width {
-                    cur.push_str(&ws);
-                    cur_len += ws_len;
-                }
-            } else if cur_len + word_len <= width {
-                cur.push_str(&word);
-                cur_len += word_len;
-                if cur_len + ws_len <= width {
-                    cur.push_str(&ws);
-                    cur_len += ws_len;
-                }
-            } else {
-                out.push(cur.clone());
-                cur.clear();
-                cur.push_str(&word);
-                cur_len = word_len;
-                if cur_len + ws_len <= width {
-                    cur.push_str(&ws);
-                    cur_len += ws_len;
-                }
-            }
-        }
-
-        out.push(cur);
+        output.push(current.concat());
     }
-    out
+    output
 }
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_text;
+    use super::{sanitize_for_terminal, wrap_text};
 
     #[test]
     fn short_line_passes_through_unchanged() {
@@ -256,7 +242,7 @@ mod tests {
     fn long_word_is_hard_broken() {
         let wrapped = wrap_text("supercalifragilisticexpialidocious", 10);
         assert_eq!(wrapped.len(), 4);
-        assert_eq!(wrapped.iter().map(|s| s.chars().count()).sum::<usize>(), 34);
+        assert_eq!(wrapped.concat(), "supercalifragilisticexpialidocious");
     }
 
     #[test]
@@ -273,5 +259,27 @@ mod tests {
     #[test]
     fn width_zero_falls_back_to_no_wrap() {
         assert_eq!(wrap_text("hello world", 0), vec!["hello world"]);
+    }
+
+    #[test]
+    fn wide_characters_wrap_at_display_width() {
+        assert_eq!(wrap_text("界界界", 4), vec!["界界", "界"]);
+    }
+
+    #[test]
+    fn grapheme_clusters_are_not_split() {
+        assert_eq!(
+            wrap_text("e\u{301}e\u{301}", 1),
+            vec!["e\u{301}", "e\u{301}"]
+        );
+    }
+
+    #[test]
+    fn terminal_controls_are_rendered_as_visible_text() {
+        assert_eq!(
+            sanitize_for_terminal("name\u{1b}]52;c;payload\u{7}", false),
+            "name\\x1B]52;c;payload\\x07"
+        );
+        assert_eq!(sanitize_for_terminal("a\nb\t", true), "a\nb\\x09");
     }
 }
