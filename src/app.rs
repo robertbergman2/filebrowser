@@ -17,6 +17,7 @@ pub struct App {
     entries: Vec<Entry>,
     selected: usize,
     scroll_offset: usize,
+    preview_scroll: usize,
     should_quit: bool,
 }
 
@@ -32,6 +33,7 @@ impl App {
             entries,
             selected: 0,
             scroll_offset: 0,
+            preview_scroll: 0,
             should_quit: false,
         }
     }
@@ -54,6 +56,10 @@ impl App {
         self.scroll_offset
     }
 
+    pub fn preview_scroll(&self) -> usize {
+        self.preview_scroll
+    }
+
     /// The entry under the cursor, if any.
     pub fn selected_entry(&self) -> Option<&Entry> {
         self.entries.get(self.selected)
@@ -72,19 +78,30 @@ impl App {
     pub fn move_down(&mut self) {
         if self.selected + 1 < self.entries.len() {
             self.selected += 1;
+            self.preview_scroll = 0;
         }
     }
 
     pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.selected > 0 {
+            self.selected -= 1;
+            self.preview_scroll = 0;
+        }
     }
 
     pub fn jump_first(&mut self) {
-        self.selected = 0;
+        if self.selected != 0 {
+            self.selected = 0;
+            self.preview_scroll = 0;
+        }
     }
 
     pub fn jump_last(&mut self) {
-        self.selected = self.entries.len().saturating_sub(1);
+        let last = self.entries.len().saturating_sub(1);
+        if self.selected != last {
+            self.selected = last;
+            self.preview_scroll = 0;
+        }
     }
 
     /// Open the selected directory (or follow `..`). Does nothing for files.
@@ -131,6 +148,25 @@ impl App {
         }
     }
 
+    /// Over-scrolling is harmless: the renderer clamps to the file's length.
+    pub fn scroll_preview_down(&mut self, amount: usize) {
+        self.preview_scroll = self.preview_scroll.saturating_add(amount);
+    }
+
+    pub fn scroll_preview_up(&mut self, amount: usize) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(amount);
+    }
+
+    /// Keep `preview_scroll` within `[0, total_lines - visible_height]` so the
+    /// viewport never shows empty rows past the end of the file. Called by the
+    /// renderer once the preview's wrapped line count and pane height are known.
+    pub fn clamp_preview_scroll(&mut self, total_lines: usize, visible_height: usize) {
+        let max = total_lines.saturating_sub(visible_height);
+        if self.preview_scroll > max {
+            self.preview_scroll = max;
+        }
+    }
+
     /// Move into `path` if it resolves to a readable directory, resetting the
     /// cursor and reloading entries.
     fn navigate_to(&mut self, path: PathBuf) {
@@ -141,6 +177,7 @@ impl App {
         self.current_dir = fs::canonicalize(&path).unwrap_or(path);
         self.selected = 0;
         self.scroll_offset = 0;
+        self.preview_scroll = 0;
         self.reload_entries();
     }
 
