@@ -70,8 +70,14 @@ fn entry_metadata(dir_entry: &fs::DirEntry) -> Option<Metadata> {
 ///
 /// Only the first [`PREVIEW_LIMIT`] bytes are read, so previewing a huge file
 /// never loads it entirely into memory. Returns `None` when the file cannot be
-/// read or appears to be binary (contains a NUL byte in the sampled region).
+/// read, is not a regular file, or appears to be binary (contains a NUL byte
+/// in the sampled region). The regular-file check prevents blocking on FIFOs
+/// and other special files when the selection changes.
 pub fn read_preview(path: &Path) -> Option<String> {
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+
     let file = File::open(path).ok()?;
 
     let mut sample = Vec::new();
@@ -87,8 +93,11 @@ pub fn read_preview(path: &Path) -> Option<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+    use std::{
+        ffi::CString,
+        os::unix::{ffi::OsStrExt, fs::symlink},
+    };
 
     /// A scratch directory removed when the test ends.
     struct TempDir {
@@ -127,7 +136,10 @@ mod tests {
 
         let entries = list_dir(&dir.path);
 
-        assert!(find(&entries, "linkdir").is_dir, "symlink to dir should list as a directory");
+        assert!(
+            find(&entries, "linkdir").is_dir,
+            "symlink to dir should list as a directory"
+        );
         assert!(!find(&entries, "file.txt").is_dir);
     }
 
@@ -139,5 +151,37 @@ mod tests {
         let entries = list_dir(&dir.path);
 
         assert!(!find(&entries, "dangling").is_dir);
+    }
+
+    #[test]
+    fn preview_rejects_non_regular_files() {
+        let dir = TempDir::new("non_regular_preview");
+
+        assert_eq!(read_preview(&dir.path), None);
+    }
+
+    #[test]
+    fn preview_rejects_fifo_without_opening_it() {
+        let dir = TempDir::new("fifo_preview");
+        let fifo = dir.path.join("pipe");
+        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+
+        // SAFETY: `path` is a NUL-terminated path owned by this test, and the
+        // requested permissions do not grant access beyond the current user.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+
+        assert_eq!(read_preview(&fifo), None);
+    }
+
+    #[test]
+    fn preview_follows_symlinks_to_regular_files() {
+        let dir = TempDir::new("symlink_file_preview");
+        fs::write(dir.path.join("target.txt"), b"hello").unwrap();
+        symlink(dir.path.join("target.txt"), dir.path.join("link.txt")).unwrap();
+
+        assert_eq!(
+            read_preview(&dir.path.join("link.txt")),
+            Some("hello".to_string())
+        );
     }
 }

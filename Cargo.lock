@@ -151,7 +151,10 @@ name = "filebrowser"
 version = "0.1.0"
 dependencies = [
  "crossterm 0.27.0",
+ "libc",
  "ratatui",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
